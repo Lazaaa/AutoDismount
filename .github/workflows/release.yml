@@ -1,0 +1,45 @@
+name: Auto Build and Release
+
+on:
+  push:
+    branches: [ AutoDismount ]
+  workflow_dispatch:  
+
+permissions:
+  contents: write 
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kód letöltése
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verziószám generálása
+        id: version
+        run: |
+          BASE_VERSION="v1.2"
+          PATCH="${{ github.run_number }}"
+          VERSION="${BASE_VERSION}.${PATCH}"
+          echo "tag=${VERSION}" >> $GITHUB_OUTPUT
+          echo "name=Release ${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: ZIP csomag elkészítése
+        run: |
+          git archive HEAD --format=zip --output=source.zip
+          mkdir -p temp/AutoDismount
+          unzip source.zip -d temp/AutoDismount
+          cd temp
+          zip -r ../AutoDismount.zip AutoDismount/
+          cd ..
+
+      - name: Release létrehozása és a ZIP feltöltése
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.name }}
+          draft: false
+          prerelease: false
+          files: AutoDismount.zip
