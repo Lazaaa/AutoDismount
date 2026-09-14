@@ -20,7 +20,7 @@ jobs:
       - name: Verziószám generálása
         id: version
         run: |
-          BASE_VERSION="v1.2"
+          BASE_VERSION="v1.0"
           PATCH="${{ github.run_number }}"
           VERSION="${BASE_VERSION}.${PATCH}"
           echo "tag=${VERSION}" >> $GITHUB_OUTPUT
