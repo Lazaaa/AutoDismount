@@ -1,0 +1,8 @@
+<Bindings>
+    <Binding name="AUTODISMOUNT_TRIGGER" header="AUTODISMOUNT">
+        AutoDismount_Trigger()
+    </Binding>
+    <Binding name="AUTODISMOUNT_SCAN" header="AUTODISMOUNT">
+        AutoDismount_Scan()
+    </Binding>
+</Bindings>
