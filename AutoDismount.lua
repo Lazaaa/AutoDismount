@@ -1,9 +1,9 @@
 -- AutoDismount
 -- Automatically dismounts and cancels shapeshifts when:
 --   - Targeting a friendly NPC (prevents "Can't speak while shapeshifted")
+--   - Trying to interact with game objects (mining, herbalism, quest items)
 --   - Opening a merchant window
 --   - Opening the taxi map
--- Also provides a minimap icon for manual trigger (works while shapeshifted).
 -- Emberveil (1.12.1) compatible.
 
 AutoDismount = AutoDismount or {}
@@ -27,6 +27,7 @@ local function InitDB()
             onMerchant = true,
             onTaxi = true,
             onNpcTarget = true,
+            onError = true,
             cancelForms = true,
             debug = false,
         }
@@ -35,6 +36,7 @@ local function InitDB()
     if AutoDismountDB.onMerchant == nil then AutoDismountDB.onMerchant = true end
     if AutoDismountDB.onTaxi == nil then AutoDismountDB.onTaxi = true end
     if AutoDismountDB.onNpcTarget == nil then AutoDismountDB.onNpcTarget = true end
+    if AutoDismountDB.onError == nil then AutoDismountDB.onError = true end
     if AutoDismountDB.cancelForms == nil then AutoDismountDB.cancelForms = true end
     if AutoDismountDB.debug == nil then AutoDismountDB.debug = false end
 end
@@ -43,10 +45,11 @@ InitDB()
 
 -- =====================================================
 --  DEBUG HELPER
+--  Prints only when AutoDismountDB.debug is true.
 -- =====================================================
 
 local function Debug(msg)
-    if AutoDismountDB.debug then
+    if AutoDismountDB and AutoDismountDB.debug then
         DEFAULT_CHAT_FRAME:AddMessage("|cff808080[AutoDismount DEBUG]|r " .. tostring(msg))
     end
 end
@@ -104,15 +107,11 @@ local FORM_SPELL_ALIASES = {
 
 -- =====================================================
 --  RUNSPELL HELPER
---  Clears the target before casting, then restores it.
---  Without clearing, a friendly NPC target makes the
---  client redirect the spell and the cast fails.
 -- =====================================================
 
 local function RunSpellByName(spellName)
     if not spellName then return false end
 
-    -- Save current target state
     local hadTarget = UnitExists("target") and true or false
     local targetIsEnemy = false
     if hadTarget then
@@ -122,18 +121,15 @@ local function RunSpellByName(spellName)
 
     Debug("Target before cast: " .. tostring(hadTarget) .. " (enemy=" .. tostring(targetIsEnemy) .. ")")
 
-    -- Clear target so the self-cast spell does not get redirected
     if hadTarget and not targetIsEnemy then
         ClearTarget()
         Debug("Cleared friendly target before cast")
     end
 
-    -- Try casting
     local ok1 = pcall(CastSpellByName, spellName)
     if ok1 then
         Debug("Cast via direct CastSpellByName('" .. spellName .. "')")
     else
-        -- Fallback: RunScript
         local escaped = string.gsub(spellName, "'", "\\'")
         local ok2 = pcall(RunScript, "CastSpellByName('" .. escaped .. "')")
         if ok2 then
@@ -143,9 +139,7 @@ local function RunSpellByName(spellName)
         end
     end
 
-    -- Restore target if we cleared it
     if hadTarget and not targetIsEnemy then
-        -- Defer target restoration by a frame so the cast has a chance to fire
         local restoreFrame = CreateFrame("Frame")
         local t = 0
         restoreFrame:SetScript("OnUpdate", function()
@@ -190,6 +184,7 @@ local cachedFormSpell = nil
 local cachedFormIcon = nil
 local cachedFormTime = 0
 local cacheAccum = 0
+local suppressCacheUntil = 0
 
 local cacheFrame = CreateFrame("Frame")
 cacheFrame:SetScript("OnUpdate", function()
@@ -198,6 +193,10 @@ cacheFrame:SetScript("OnUpdate", function()
     cacheAccum = 0
 
     if not AutoDismountDB or not AutoDismountDB.enabled then return end
+
+    if GetTime() < suppressCacheUntil then
+        return
+    end
 
     local spell, icon = DetectCurrentForm()
     if spell then
@@ -227,25 +226,45 @@ end
 --  CANCEL SHAPESHIFT FORMS
 -- =====================================================
 
+local cancellingForm = false
+local lastCancelTime = 0
+local CANCEL_COOLDOWN = 2.0
+
 local function TryCancelForms()
+    if cancellingForm then return 0 end
+
+    local now = GetTime()
+    if (now - lastCancelTime) < CANCEL_COOLDOWN then
+        Debug("Cancel on cooldown (" .. string.format("%.1f", CANCEL_COOLDOWN - (now - lastCancelTime)) .. "s left)")
+        return 0
+    end
+
+    cancellingForm = true
+    lastCancelTime = now
+    suppressCacheUntil = now + 3.0
+
+    local result = 0
+
     local liveSpell = DetectCurrentForm()
     if liveSpell then
         Debug("Live form detected: " .. liveSpell)
         RunSpellByName(liveSpell)
         ClearFormCache()
-        return 1
+        result = 1
+    else
+        local cachedSpell = GetCachedForm()
+        if cachedSpell then
+            Debug("Using cached form: " .. cachedSpell)
+            RunSpellByName(cachedSpell)
+            ClearFormCache()
+            result = 1
+        else
+            Debug("No form detected")
+        end
     end
 
-    local cachedSpell = GetCachedForm()
-    if cachedSpell then
-        Debug("Using cached form: " .. cachedSpell)
-        RunSpellByName(cachedSpell)
-        ClearFormCache()
-        return 1
-    end
-
-    Debug("No form detected")
-    return 0
+    cancellingForm = false
+    return result
 end
 
 -- =====================================================
@@ -323,13 +342,13 @@ local function DismountAndUnshift(verbose)
 
     if verbose then
         if didDismount then
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00AutoDismount:|r Dismount triggered.")
+            Debug("Dismount triggered")
         end
         if didCancel and didCancel > 0 then
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00AutoDismount:|r Cancelled " .. didCancel .. " form(s).")
+            Debug("Cancelled " .. didCancel .. " form(s)")
         end
         if not didDismount and (not didCancel or didCancel == 0) then
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00AutoDismount:|r Nothing to dismount or cancel.")
+            Debug("Nothing to dismount or cancel")
         end
     end
 
@@ -365,6 +384,56 @@ function AutoDismount_Scan()
 end
 
 -- =====================================================
+--  ERROR PATTERNS
+-- =====================================================
+
+local ERROR_PATTERNS = {
+    "shapeshift",
+    "shapeshifted",
+    "shift form",
+    "shifted form",
+}
+
+local function IsShapeshiftError(msg)
+    if not msg then return false end
+    local lower = string.lower(msg)
+    for _, pattern in ipairs(ERROR_PATTERNS) do
+        if string.find(lower, pattern, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+-- =====================================================
+--  SCHEDULED CANCEL
+-- =====================================================
+
+local scheduledCancelPending = false
+
+local function ScheduleCancelWithDelay(delaySeconds)
+    if scheduledCancelPending then return end
+    scheduledCancelPending = true
+
+    local delayFrame = CreateFrame("Frame")
+    local delayTime = 0
+    delayFrame:SetScript("OnUpdate", function()
+        delayTime = delayTime + (arg1 or 0)
+        if delayTime >= delaySeconds then
+            delayFrame:SetScript("OnUpdate", nil)
+            delayFrame:Hide()
+            scheduledCancelPending = false
+
+            Debug("Delayed cancel executing now")
+            local didCancel = TryCancelForms()
+            if didCancel > 0 then
+                Debug("Cancelled " .. didCancel .. " form(s)")
+            end
+        end
+    end)
+end
+
+-- =====================================================
 --  EVENT HANDLER
 -- =====================================================
 
@@ -372,24 +441,36 @@ local eventFrame = CreateFrame("Frame", "AutoDismountFrame")
 eventFrame:RegisterEvent("MERCHANT_SHOW")
 eventFrame:RegisterEvent("TAXIMAP_OPENED")
 eventFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+eventFrame:RegisterEvent("UI_ERROR_MESSAGE")
 eventFrame:RegisterEvent("ADDON_LOADED")
 
 eventFrame:SetScript("OnEvent", function()
     if event == "ADDON_LOADED" then
         if arg1 == "AutoDismount" then
             InitDB()
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00AutoDismount|r by Kharon v1.0.0 loaded. Use |cffFFD700/ad|r for options.")
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00AutoDismount|r by Kharon v1.9.1 loaded. Use |cffFFD700/ad|r for options.")
         end
 
     elseif event == "PLAYER_TARGET_CHANGED" then
-        -- Cancel form when targeting a friendly NPC
         if AutoDismountDB.enabled and AutoDismountDB.onNpcTarget and AutoDismountDB.cancelForms then
             if UnitExists("target") and UnitIsFriend("player", "target") and not UnitIsPlayer("target") then
                 Debug("Friendly NPC targeted - cancelling form")
                 local didCancel = TryCancelForms()
                 if didCancel > 0 then
-                    DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00AutoDismount:|r Cancelled " .. didCancel .. " form(s) (NPC targeted).")
+                    Debug("Cancelled " .. didCancel .. " form(s) (NPC targeted)")
                 end
+            end
+        end
+
+    elseif event == "UI_ERROR_MESSAGE" then
+        if AutoDismountDB.enabled and AutoDismountDB.onError and AutoDismountDB.cancelForms then
+            local errorMessage = arg2 or arg1
+
+            Debug("UI_ERROR_MESSAGE: a1=" .. tostring(arg1) .. " a2=" .. tostring(arg2))
+
+            if IsShapeshiftError(errorMessage) then
+                Debug("Shapeshift error detected - scheduling cancel in 0.2s")
+                ScheduleCancelWithDelay(0.2)
             end
         end
 
@@ -479,6 +560,11 @@ SlashCmdList["AUTODISMOUNT"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00AutoDismount:|r NPC target trigger " ..
             (AutoDismountDB.onNpcTarget and "enabled" or "disabled"))
 
+    elseif msg == "error" then
+        AutoDismountDB.onError = not AutoDismountDB.onError
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00AutoDismount:|r Error trigger " ..
+            (AutoDismountDB.onError and "enabled" or "disabled"))
+
     elseif msg == "forms" then
         AutoDismountDB.cancelForms = not AutoDismountDB.cancelForms
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00AutoDismount:|r Cancel forms " ..
@@ -501,6 +587,7 @@ SlashCmdList["AUTODISMOUNT"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("  |cffFFD700/ad merchant|r - Toggle trigger at merchants")
         DEFAULT_CHAT_FRAME:AddMessage("  |cffFFD700/ad taxi|r - Toggle trigger at taxi map")
         DEFAULT_CHAT_FRAME:AddMessage("  |cffFFD700/ad npc|r - Toggle trigger when targeting NPCs")
+        DEFAULT_CHAT_FRAME:AddMessage("  |cffFFD700/ad error|r - Toggle trigger on interaction errors (mining)")
         DEFAULT_CHAT_FRAME:AddMessage("  |cffFFD700/ad forms|r - Toggle shapeshift cancellation")
         DEFAULT_CHAT_FRAME:AddMessage("  |cffFFD700/ad debug|r - Toggle debug messages")
         DEFAULT_CHAT_FRAME:AddMessage("  |cffFFD700/ad test|r - Trigger manually")
