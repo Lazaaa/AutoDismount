@@ -6,7 +6,7 @@ on:
   workflow_dispatch:  
 
 permissions:
-  contents: write 
+  contents: write  
 
 jobs:
   release:
@@ -28,12 +28,7 @@ jobs:
 
       - name: ZIP csomag elkészítése
         run: |
-          git archive HEAD --format=zip --output=source.zip
-          mkdir -p temp/AutoDismount
-          unzip source.zip -d temp/AutoDismount
-          cd temp
-          zip -r ../AutoDismount.zip AutoDismount/
-          cd ..
+          git archive --format=zip --prefix=AutoDismount/ -o AutoDismount.zip HEAD
 
       - name: Release létrehozása és a ZIP feltöltése
         uses: softprops/action-gh-release@v2
