@@ -2,7 +2,7 @@
 ## Title: AutoDismount
 ## Notes: Automatically dismounts and cancels shapeshifts when talking to a merchant or using a taxi
 ## Author: Kharon
-## Version: 1.8.1
+## Version: 1.2.2
 ## SavedVariables: AutoDismountDB
 
 Bindings.xml
